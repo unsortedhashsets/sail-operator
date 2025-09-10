@@ -37,6 +37,7 @@ var (
 	clRemote                      client.Client
 	err                           error
 	debugInfoLogged               bool
+	ocp                           = env.GetBool("OCP", false)
 	controlPlaneNamespace         = env.Get("CONTROL_PLANE_NS", "istio-system")
 	externalControlPlaneNamespace = env.Get("EXTERNAL_CONTROL_PLANE_NS", "external-istiod")
 	istioName                     = env.Get("ISTIO_NAME", "default")
