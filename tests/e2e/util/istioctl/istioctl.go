@@ -54,7 +54,7 @@ func CreateRemoteSecret(remoteKubeconfig, namespace, secretName, internalIP stri
 		cmd += (" " + strings.Join(additionalFlags, " "))
 	}
 	if env.GetBool("OCP", false) {
-		cmdStr += " --create-service-account=false"
+		cmd += " --create-service-account=false"
 	}
 
 	yaml, err := shell.ExecuteCommand(cmd)
