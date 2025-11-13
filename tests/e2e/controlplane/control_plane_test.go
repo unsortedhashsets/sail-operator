@@ -273,11 +273,24 @@ func getProxyVersion(podName, namespace string) (*semver.Version, error) {
 	}
 
 	lines := strings.Split(proxyStatus, "\n")
+
+	versionIdx := -1
+	headers := strings.Fields(lines[0])
+	for i, header := range headers {
+		if header == "VERSION" {
+			versionIdx = i
+			break
+		}
+	}
+	if versionIdx == -1 {
+		return nil, fmt.Errorf("VERSION header not found")
+	}
+
 	var versionStr string
-	for _, line := range lines {
+	for _, line := range lines[1:] {
 		if strings.Contains(line, podName+"."+namespace) {
 			values := strings.Fields(line)
-			versionStr = values[len(values)-1]
+			versionStr = values[versionIdx]
 			break
 		}
 	}
