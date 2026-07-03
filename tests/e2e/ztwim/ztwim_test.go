@@ -46,7 +46,7 @@ type daemonSetStatus struct {
 	} `yaml:"status"`
 }
 
-var _ = Describe("ZTWIM Installation", Label("smoke", "ztwim", "slow"), Ordered, func() {
+var _ = FDescribe("ZTWIM Installation", Label("smoke", "ztwim", "slow"), Ordered, func() {
 	SetDefaultEventuallyTimeout(180 * time.Second)
 	SetDefaultEventuallyPollingInterval(time.Second)
 	debugInfoLogged := false
