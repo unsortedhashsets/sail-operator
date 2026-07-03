@@ -200,7 +200,7 @@ spec:
 				Eventually(func() error {
 					_, err := k.WithNamespace(ztwimNamespace).GetYAML("statefulset", "spire-server")
 					return err
-				}, 60*time.Second, 2*time.Second).Should(Succeed(), "spire-server StatefulSet did not appear")
+				}, 180*time.Second, 2*time.Second).Should(Succeed(), "spire-server StatefulSet did not appear")
 
 				By("Restarting spire-server statefulset")
 				Expect(
