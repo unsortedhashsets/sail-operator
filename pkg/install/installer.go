@@ -184,6 +184,11 @@ func (inst *installer) reconcile(ctx context.Context, opts Options) Status {
 		return status
 	}
 
+	if err := reconcileAggregationClusterRoles(ctx, inst.cl, opts.Revision); err != nil {
+		status.Error = errors.Join(status.Error, fmt.Errorf("failed to reconcile RBAC aggregation ClusterRoles: %w", err))
+		return status
+	}
+
 	status.Installed = true
 	return status
 }
@@ -202,6 +207,11 @@ func (inst *installer) uninstall(ctx context.Context, namespace, revision string
 	if err := istiodReconciler.Uninstall(ctx, namespace, revision); err != nil {
 		return fmt.Errorf("uninstallation failed: %w", err)
 	}
+
+	if err := deleteAggregationClusterRoles(ctx, inst.cl, revision); err != nil {
+		return fmt.Errorf("failed to delete RBAC aggregation ClusterRoles: %w", err)
+	}
+
 	return nil
 }
 
