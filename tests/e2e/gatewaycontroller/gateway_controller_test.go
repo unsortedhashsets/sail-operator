@@ -94,6 +94,21 @@ var _ = Describe("Gateway Controller with Install Library", Label("gateway-contr
 				GatewayClasses: json.RawMessage(gatewayClassesJSON),
 			}
 
+			// On a dual-stack cluster the gateway pod gets both an IPv6 and an IPv4 address.
+			// Without ISTIO_DUAL_STACK the proxy bootstrap falls back to the IPv4 wildcard
+			// (istio pkg/bootstrap/config.go), so the Envoy static listener on the status port
+			// binds 0.0.0.0 only. kubelet probes the pod's *primary* IP, so on an IPv6-primary
+			// cluster the startup probe fails with "connection refused" and the gateway never
+			// becomes available. The Istio CR gets the same settings on those clusters, see
+			// kubectl.CreateFromString - the install library bypasses that path.
+			if env.Get("IP_FAMILY", "ipv4") == "dual" {
+				overlay.Pilot.IpFamilyPolicy = ptr.Of("RequireDualStack")
+				overlay.Pilot.Env["ISTIO_DUAL_STACK"] = "true"
+				overlay.MeshConfig.DefaultConfig = &v1.MeshConfigProxyConfig{
+					ProxyMetadata: map[string]string{"ISTIO_DUAL_STACK": "true"},
+				}
+			}
+
 			merged, err := install.MergeValues(gatewayDefaults, overlay)
 			Expect(err).NotTo(HaveOccurred())
 
