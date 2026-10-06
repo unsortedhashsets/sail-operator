@@ -118,7 +118,69 @@ func (k Kubectl) CreateFromString(yamlString string) error {
 	if err != nil {
 		return fmt.Errorf("error creating resource from yaml: %w", err)
 	}
+	return k.patchIstioForDualStack(yamlString)
+}
+
+// patchIstioForDualStack makes a freshly created Istio CR dual-stack on a dual-stack cluster.
+// An Istio CR without ipFamilyPolicy yields a single-stack, IPv4-primary control plane even there,
+// so a suite would exercise IPv4 only and still pass - indistinguishable from real coverage.
+// Many suites build the CR inline rather than going through common.CreateIstio, so the hook lives
+// here to cover all of them. No-op unless IP_FAMILY=dual and the document is an Istio CR.
+// IPv6 single-stack needs nothing: the cluster has no IPv4 to fall back to.
+func (k Kubectl) patchIstioForDualStack(yamlString string) error {
+	if os.Getenv("IP_FAMILY") != "dual" {
+		return nil
+	}
+	name, isIstio := istioCRName(yamlString)
+	if !isIstio {
+		return nil
+	}
+	if name == "" {
+		// Dual-stack cluster and an Istio CR was created, but we could not find its name, so it is
+		// NOT patched and the suite would quietly run single-family. Never fail silently here.
+		fmt.Printf("WARNING: dual-stack cluster and an Istio CR was created, but metadata.name "+
+			"could not be parsed - the CR was NOT patched for dual-stack:\n%s\n", yamlString)
+		return nil
+	}
+	patch := `{"spec":{"values":{` +
+		`"pilot":{"ipFamilyPolicy":"RequireDualStack","env":{"ISTIO_DUAL_STACK":"true"}},` +
+		`"meshConfig":{"defaultConfig":{"proxyMetadata":{"ISTIO_DUAL_STACK":"true"}}}}}}`
+	if err := k.Patch("istio", name, "merge", patch); err != nil {
+		return fmt.Errorf("error patching Istio %q for dual-stack: %w", name, err)
+	}
+	// Log it: a silently applied (or silently skipped) mutation is exactly what made
+	// single-family runs on dual-stack clusters indistinguishable from real coverage.
+	fmt.Printf("Istio %q patched for dual-stack (ipFamilyPolicy=RequireDualStack)\n", name)
 	return nil
+}
+
+// istioCRName reports whether any document in yamlString is an Istio CR, and its metadata.name.
+// Only unindented keys count as document-level, so a nested `targetRef.kind: Istio` - which every
+// ZTunnel and IstioCNI CR carries - is not mistaken for an Istio resource.
+func istioCRName(yamlString string) (string, bool) {
+	for _, doc := range strings.Split(yamlString, "\n---") {
+		isIstio, inMetadata, name := false, false, ""
+		for _, line := range strings.Split(doc, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if line[0] == ' ' || line[0] == '\t' {
+				if inMetadata && name == "" && strings.HasPrefix(trimmed, "name:") {
+					name = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+				}
+				continue
+			}
+			inMetadata = trimmed == "metadata:"
+			if strings.HasPrefix(trimmed, "kind:") {
+				isIstio = trimmed == "kind: Istio"
+			}
+		}
+		if isIstio {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // ApplyString applies the given yaml string to the cluster
