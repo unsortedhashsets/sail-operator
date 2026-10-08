@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	v1 "github.com/istio-ecosystem/sail-operator/api/v1"
 	"github.com/istio-ecosystem/sail-operator/pkg/kube"
 	. "github.com/istio-ecosystem/sail-operator/pkg/test/util/ginkgo"
 	. "github.com/istio-ecosystem/sail-operator/tests/e2e/util/gomega"
@@ -45,6 +46,36 @@ func AwaitCondition[T ~string](ctx context.Context, condition T, key client.Obje
 		Should(HaveConditionStatus(condition, metav1.ConditionTrue),
 			fmt.Sprintf("%s %q is not %s on %s; unexpected Condition", kind, key.Name, condition, cluster))
 	Success(fmt.Sprintf("%s %q is %s on %s", kind, key.Name, condition, cluster))
+
+	if istio, ok := obj.(*v1.Istio); ok && string(condition) == string(v1.IstioConditionReady) {
+		logIstiodIPFamilies(ctx, cl, istio)
+	}
+}
+
+// logIstiodIPFamilies prints the IP families the istiod Service actually received. This is the
+// check that proves a dual-stack run really is dual-stack: the first entry of clusterIPs is the
+// primary family, so on an IPv6-primary cluster it must be an IPv6 address. Logged for every
+// control plane on every run - on a single-stack run it is the baseline to compare against.
+func logIstiodIPFamilies(ctx context.Context, cl client.Client, istio *v1.Istio) {
+	services := &corev1.ServiceList{}
+	// List by label rather than getting "istiod" by name, so revision-based and multi control
+	// plane installs (istiod-<revision>) are covered too.
+	if err := cl.List(ctx, services, client.InNamespace(istio.Spec.Namespace), client.MatchingLabels{"app": "istiod"}); err != nil {
+		kubectl.LogDualStack("WARNING: Istio %q is Ready but its istiod Service could not be listed: %v", istio.Name, err)
+		return
+	}
+	if len(services.Items) == 0 {
+		kubectl.LogDualStack("WARNING: Istio %q is Ready but no istiod Service was found in namespace %q", istio.Name, istio.Spec.Namespace)
+		return
+	}
+	for _, svc := range services.Items {
+		policy := "<unset>"
+		if svc.Spec.IPFamilyPolicy != nil {
+			policy = string(*svc.Spec.IPFamilyPolicy)
+		}
+		kubectl.LogDualStack("Istio %q: Service %s/%s ipFamilyPolicy=%s ipFamilies=%v clusterIPs=%v (first = primary)",
+			istio.Name, svc.Namespace, svc.Name, policy, svc.Spec.IPFamilies, svc.Spec.ClusterIPs)
+	}
 }
 
 // AwaitDeployment to reach the Available state.

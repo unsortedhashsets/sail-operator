@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/istio-ecosystem/sail-operator/pkg/test/project"
@@ -128,30 +129,115 @@ func (k Kubectl) CreateFromString(yamlString string) error {
 // here to cover all of them. No-op unless IP_FAMILY=dual and the document is an Istio CR.
 // IPv6 single-stack needs nothing: the cluster has no IPv4 to fall back to.
 func (k Kubectl) patchIstioForDualStack(yamlString string) error {
-	if os.Getenv("IP_FAMILY") != "dual" {
+	// Loose count first, so the log can tell "this YAML has no Istio CR" apart from "it has one
+	// and the strict parser below failed to see it" - the second is what silently costs coverage.
+	istioDocs := countIstioDocs(yamlString)
+	if istioDocs == 0 {
 		return nil
 	}
+	k.logClusterIPFamily()
+
+	ipFamily := os.Getenv("IP_FAMILY")
+	if ipFamily != "dual" {
+		LogDualStack("IP_FAMILY=%q, %d Istio CR(s) created - not patching, control plane stays single-stack", ipFamily, istioDocs)
+		return nil
+	}
+
 	name, isIstio := istioCRName(yamlString)
-	if !isIstio {
-		return nil
-	}
-	if name == "" {
-		// Dual-stack cluster and an Istio CR was created, but we could not find its name, so it is
+	if !isIstio || name == "" {
+		// Dual-stack cluster and an Istio CR was created, but we could not identify it, so it is
 		// NOT patched and the suite would quietly run single-family. Never fail silently here.
-		fmt.Printf("WARNING: dual-stack cluster and an Istio CR was created, but metadata.name "+
-			"could not be parsed - the CR was NOT patched for dual-stack:\n%s\n", yamlString)
+		LogDualStack("WARNING: dual-stack cluster and %d Istio CR(s) created, but the parser "+
+			"resolved isIstio=%t name=%q - NOT patched, this suite will run SINGLE-STACK:\n%s",
+			istioDocs, isIstio, name, yamlString)
 		return nil
 	}
+	if istioDocs > 1 {
+		LogDualStack("WARNING: %d Istio CRs in one document but only %q is patched - the rest stay SINGLE-STACK", istioDocs, name)
+	}
+
 	patch := `{"spec":{"values":{` +
 		`"pilot":{"ipFamilyPolicy":"RequireDualStack","env":{"ISTIO_DUAL_STACK":"true"}},` +
 		`"meshConfig":{"defaultConfig":{"proxyMetadata":{"ISTIO_DUAL_STACK":"true"}}}}}}`
+	LogDualStack("patching Istio %q with %s", name, patch)
 	if err := k.Patch("istio", name, "merge", patch); err != nil {
 		return fmt.Errorf("error patching Istio %q for dual-stack: %w", name, err)
 	}
-	// Log it: a silently applied (or silently skipped) mutation is exactly what made
+	// Read the values back off the live CR: the log should carry proof the patch landed, not just
+	// that it was sent. A silently applied (or silently skipped) mutation is exactly what made
 	// single-family runs on dual-stack clusters indistinguishable from real coverage.
-	fmt.Printf("Istio %q patched for dual-stack (ipFamilyPolicy=RequireDualStack)\n", name)
+	k.logIstioDualStackValues(name)
 	return nil
+}
+
+// LogDualStack writes one dual-stack diagnostic line. The prefix lets a whole Jenkins console log
+// be reduced to the dual-stack story with `grep '\[dual-stack\]'`.
+func LogDualStack(format string, args ...any) {
+	fmt.Printf("[dual-stack] "+format+"\n", args...)
+}
+
+var logClusterIPFamilyOnce sync.Once
+
+// logClusterIPFamily prints what the suite believes it is running on, once per test process, so
+// every Jenkins log opens with the answer. The first clusterNetwork CIDR is the cluster's primary
+// family and therefore decides the primary ClusterIP of every Service, including istiod's.
+func (k Kubectl) logClusterIPFamily() {
+	logClusterIPFamilyOnce.Do(func() {
+		ipFamily := os.Getenv("IP_FAMILY")
+		cidrs, err := k.executeCommand(k.build(" get network cluster -o jsonpath={.spec.clusterNetwork[*].cidr}"))
+		if err != nil {
+			// Not OpenShift (e.g. kind), or no permission - the env var is still worth printing.
+			LogDualStack("IP_FAMILY=%q; could not read network/cluster to confirm the cluster families: %v", ipFamily, err)
+			return
+		}
+		LogDualStack("IP_FAMILY=%q; cluster pod CIDRs=%q (first CIDR is the primary family)", ipFamily, strings.TrimSpace(cidrs))
+	})
+}
+
+// logIstioDualStackValues reads the three dual-stack settings back off the live Istio CR.
+func (k Kubectl) logIstioDualStackValues(name string) {
+	const jsonPath = `{.spec.values.pilot.ipFamilyPolicy} {.spec.values.pilot.env.ISTIO_DUAL_STACK} ` +
+		`{.spec.values.meshConfig.defaultConfig.proxyMetadata.ISTIO_DUAL_STACK}`
+	out, err := k.executeCommand(k.build(fmt.Sprintf(" get istio %s -o jsonpath=%q", name, jsonPath)))
+	if err != nil {
+		LogDualStack("WARNING: Istio %q was patched but could not be read back: %v", name, err)
+		return
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 3 {
+		LogDualStack("WARNING: Istio %q read back as %q - expected ipFamilyPolicy + 2 ISTIO_DUAL_STACK values, "+
+			"so at least one did NOT stick", name, strings.TrimSpace(out))
+		return
+	}
+	LogDualStack("Istio %q now has pilot.ipFamilyPolicy=%s pilot.env.ISTIO_DUAL_STACK=%s proxyMetadata.ISTIO_DUAL_STACK=%s",
+		name, fields[0], fields[1], fields[2])
+}
+
+// countIstioDocs reports how many YAML documents declare a top-level Istio kind, matching loosely
+// on purpose: trailing comments, quoting and extra spaces all count. istioCRName below matches
+// strictly, so a disagreement between the two means the strict parser missed a CR and the suite
+// is about to run single-stack without saying so. Logging only - it never selects what to patch.
+func countIstioDocs(yamlString string) int {
+	count := 0
+	for _, doc := range strings.Split(yamlString, "\n---") {
+		for _, line := range strings.Split(doc, "\n") {
+			if line == "" || line[0] == ' ' || line[0] == '\t' {
+				continue
+			}
+			key, value, found := strings.Cut(line, ":")
+			if !found || strings.TrimSpace(key) != "kind" {
+				continue
+			}
+			if comment := strings.Index(value, "#"); comment >= 0 {
+				value = value[:comment]
+			}
+			if strings.Trim(strings.TrimSpace(value), `"'`) == "Istio" {
+				count++
+				break
+			}
+		}
+	}
+	return count
 }
 
 // istioCRName reports whether any document in yamlString is an Istio CR, and its metadata.name.
