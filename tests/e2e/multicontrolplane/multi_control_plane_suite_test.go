@@ -42,16 +42,13 @@ var (
 	appNamespace2a         = env.Get("APP_NAMESPACE2A", "app2a")
 	appNamespace2b         = env.Get("APP_NAMESPACE2B", "app2b")
 	multicluster           = env.GetBool("MULTICLUSTER", false)
+	ipFamily               = env.Get("IP_FAMILY", "ipv4")
 
 	k kubectl.Kubectl
 )
 
 func TestMultiControlPlane(t *testing.T) {
-	// Dual-stack clusters used to be excluded here (sail-operator#414: the suite takes ~10min
-	// and did not validate any datapath use case). The control plane CR is now patched to
-	// ipFamilyPolicy: RequireDualStack on those clusters (see kubectl.CreateFromString), so the
-	// suite now covers operator reconciliation of a dual-stack control plane.
-	if multicluster {
+	if ipFamily == "dual" || multicluster {
 		t.Skip("Skipping the multi control plane tests")
 	}
 	RegisterFailHandler(Fail)
