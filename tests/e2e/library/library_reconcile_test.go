@@ -21,9 +21,11 @@ import (
 	"fmt"
 	"time"
 
+	v1 "github.com/istio-ecosystem/sail-operator/api/v1"
 	"github.com/istio-ecosystem/sail-operator/chart"
 	"github.com/istio-ecosystem/sail-operator/pkg/config"
 	"github.com/istio-ecosystem/sail-operator/pkg/constants"
+	"github.com/istio-ecosystem/sail-operator/pkg/env"
 	"github.com/istio-ecosystem/sail-operator/pkg/install"
 	"github.com/istio-ecosystem/sail-operator/pkg/istioversion"
 	. "github.com/istio-ecosystem/sail-operator/pkg/test/util/ginkgo"
@@ -46,6 +48,27 @@ const (
 	loopTestNamespace  = "library-test-loop"
 	driftTestNamespace = "library-test-drift"
 )
+
+// installValues returns the install library defaults, made dual-stack on a dual-stack cluster.
+// These installs go through the install library rather than an Istio CR, so the hook in
+// kubectl.CreateFromString that makes every other control plane dual-stack never sees them.
+// Without this the suite would stand up a single-stack control plane on a dual-stack cluster -
+// the exact thing OSSM-15863 is about - and nothing would report it. Same settings the gateway
+// controller suite applies to its own install library overlay.
+func installValues(namespace string) *v1.Values {
+	values := install.GatewayAPIDefaults(namespace)
+	if env.Get("IP_FAMILY", "ipv4") != "dual" {
+		return values
+	}
+	values.Pilot.IpFamilyPolicy = ptr.Of("RequireDualStack")
+	values.Pilot.Env["ISTIO_DUAL_STACK"] = "true"
+	values.MeshConfig = &v1.MeshConfig{
+		DefaultConfig: &v1.MeshConfigProxyConfig{
+			ProxyMetadata: map[string]string{"ISTIO_DUAL_STACK": "true"},
+		},
+	}
+	return values
+}
 
 var _ = Describe("Library Reconciliation", Label("library", "reconciliation"), Ordered, func() {
 	SetDefaultEventuallyTimeout(3 * time.Minute)
@@ -89,7 +112,7 @@ var _ = Describe("Library Reconciliation", Label("library", "reconciliation"), O
 			})
 
 			Expect(lib.Apply(install.Options{
-				Values:         install.GatewayAPIDefaults(namespace),
+				Values:         installValues(namespace),
 				Namespace:      namespace,
 				Version:        istioversion.Default,
 				Revision:       revision,
@@ -169,7 +192,7 @@ var _ = Describe("Library Reconciliation", Label("library", "reconciliation"), O
 		)
 
 		installOpts := install.Options{
-			Values:         install.GatewayAPIDefaults(namespace),
+			Values:         installValues(namespace),
 			Namespace:      namespace,
 			Version:        istioversion.Default,
 			Revision:       revision,
@@ -225,7 +248,7 @@ var _ = Describe("Library Reconciliation", Label("library", "reconciliation"), O
 		)
 
 		installOpts := install.Options{
-			Values:         install.GatewayAPIDefaults(namespace),
+			Values:         installValues(namespace),
 			Namespace:      namespace,
 			Version:        istioversion.Default,
 			Revision:       revision,
